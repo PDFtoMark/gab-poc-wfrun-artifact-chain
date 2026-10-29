@@ -1,0 +1,96 @@
+name: Listener Sync
+on:
+  workflow_run:
+    workflows: ['Sync Trigger']
+    types: [completed]
+permissions:
+  actions: read
+  pull-requests: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    # Mirrors .github/workflows/sync_pull-requests.yml in backstage/backstage
+    if: >
+      github.event.workflow_run.name == 'Sync Trigger' ||
+      github.event.workflow_run.event == 'pull_request'
+    steps:
+      - name: Download PR context
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: pr-context
+          path: ./context
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Read context (verbatim logic from target)
+        if: steps.download.outcome == 'success'
+        id: context
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          script: |
+            const fs = require('fs');
+
+            function read(path, fallback = '') {
+              try { return fs.readFileSync(path, 'utf8').trim(); }
+              catch { return fallback; }
+            }
+
+            const workflowRun = context.payload.workflow_run;
+            const rawPrNumber = read('./context/pr-number');
+            const prNumber = Number(rawPrNumber);
+
+            if (
+              !/^[1-9]\d*$/.test(rawPrNumber) ||
+              !Number.isSafeInteger(prNumber)
+            ) {
+              core.setFailed('Invalid PR number in workflow artifact');
+              return;
+            }
+
+            if (workflowRun.event === 'pull_request') {
+              const { data: pullRequest } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+
+              if (
+                pullRequest.head.sha !== workflowRun.head_sha ||
+                pullRequest.head.repo?.id !== workflowRun.head_repository?.id
+              ) {
+                core.notice(
+                  'Ignoring stale PR context that does not match the triggering workflow run',
+                );
+                return;
+              }
+
+              core.setOutput('label-added', '');
+              core.setOutput('review-state', '');
+              core.setOutput('actor', workflowRun.actor.login);
+              core.setOutput('action', 'synchronize');
+            } else {
+              core.setOutput('label-added', read('./context/label-added'));
+              core.setOutput('review-state', read('./context/review-state'));
+              core.setOutput('actor', read('./context/actor'));
+              core.setOutput('action', read('./context/action', 'synchronize'));
+            }
+
+            core.setOutput('pr-number', prNumber);
+            core.info('ATTACKER-CONTROLLED VALUES ACCEPTED BY else-BRANCH');
+            core.info(`workflow_run.event=${workflowRun.event}`);
+            core.info(`pr-number=${prNumber}`);
+            core.info(`label-added=${read('./context/label-added')}`);
+            core.info(`review-state=${read('./context/review-state')}`);
+            core.info(`actor=${read('./context/actor')}`);
+            core.info(`action=${read('./context/action')}`);
+
+      - name: Show values that would be passed to pr-automation
+        if: steps.context.outputs.pr-number
+        run: |
+          echo "pr-number  = ${{ steps.context.outputs.pr-number }}"
+          echo "label-added= ${{ steps.context.outputs.label-added }}"
+          echo "review-state= ${{ steps.context.outputs.review-state }}"
+          echo "actor      = ${{ steps.context.outputs.actor }}"
+          echo "action     = ${{ steps.context.outputs.action }}"

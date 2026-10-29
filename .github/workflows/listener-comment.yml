@@ -1,0 +1,88 @@
+name: Listener Comment
+on:
+  workflow_run:
+    workflows:
+      - 'API Trigger'
+    types:
+      - completed
+permissions:
+  actions: read
+jobs:
+  setup:
+    name: Add values from previous step
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      actions: read
+    outputs:
+      git-ref: ${{ steps.event.outputs.GIT_REF }}
+      pr-number: ${{ steps.event.outputs.PR_NUMBER }}
+      action: ${{ steps.event.outputs.ACTION }}
+    steps:
+      - name: 'Download artifacts'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          script: |
+            let allArtifacts = await github.rest.actions.listWorkflowRunArtifacts({
+               owner: context.repo.owner,
+               repo: context.repo.repo,
+               run_id: context.payload.workflow_run.id,
+            });
+            let matchArtifact = allArtifacts.data.artifacts.filter((artifact) => {
+              return artifact.name == "preview-spec"
+            })[0];
+            if (matchArtifact === undefined) {
+              throw TypeError('Build Artifact not found!');
+            }
+            let download = await github.rest.actions.downloadArtifact({
+               owner: context.repo.owner,
+               repo: context.repo.repo,
+               artifact_id: matchArtifact.id,
+               archive_format: 'zip',
+            });
+            let fs = require('fs');
+            fs.writeFileSync(`${process.env.GITHUB_WORKSPACE}/preview-spec.zip`, Buffer.from(download.data));
+
+      - name: 'Accept event from first stage'
+        run: unzip preview-spec.zip event.json
+
+      - name: Read Event into ENV
+        id: event
+        run: |
+          echo PR_NUMBER=$(jq '.number | tonumber' < event.json) >> $GITHUB_OUTPUT
+          echo ACTION=$(jq --raw-output '.action | tostring | [scan("\\w+")][0]' < event.json) >> $GITHUB_OUTPUT
+          echo GIT_REF=$(jq --raw-output '.pull_request.head.sha | tostring | [scan("\\w+")][0]' < event.json) >> $GITHUB_OUTPUT
+
+      - name: Extract comment
+        run: |
+          unzip preview-spec.zip comment.md
+
+      - name: Upload comment
+        if: ${{ steps.event.outputs.ACTION != 'closed' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: api-breaking-changes-comment
+          path: comment.md
+          retention-days: 1
+
+  add-comment:
+    name: Write comment about issues
+    needs:
+      - setup
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: read
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download comment
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: api-breaking-changes-comment
+
+      - name: Create or Update Comment with API Changes
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+        with:
+          issue-number: ${{ needs.setup.outputs.pr-number }}
+          body-path: comment.md
+          edit-mode: replace

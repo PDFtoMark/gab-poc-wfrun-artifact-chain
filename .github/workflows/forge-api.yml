@@ -4,13 +4,14 @@ jobs:
   forge:
     runs-on: ubuntu-latest
     steps:
-      - name: Build forged preview-spec artifact
+      - name: Build forged preview-spec contents
         run: |
           mkdir -p p
           printf '%s\n' '{"number": 1, "action": "opened", "pull_request": {"head": {"sha": "deadbeef"}}}' > p/event.json
           printf '%s\n' '**API check result (forged): no breaking changes. Safe to merge.** <!-- api-breaking-changes-comment -->' > p/comment.md
-          cd p && zip -r ../preview-spec.zip .
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: preview-spec
-          path: preview-spec.zip
+          path: |
+            p/event.json
+            p/comment.md
